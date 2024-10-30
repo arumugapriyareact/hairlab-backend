@@ -3,90 +3,250 @@ const router = express.Router();
 const Billing = require('../models/Billing');
 const Customer = require('../models/Customer');
 
-// Create a new bill
-router.post('/', async (req, res) => {
-  try {
-    // Check if customer exists
-    let customer = await Customer.findOne({ phoneNumber: req.body.phoneNumber });
-    
-    if (!customer) {
-      // If customer doesn't exist, create a new one
-      customer = new Customer({
-        firstName: req.body.firstName,
-        lastName: req.body.lastName,
-        phoneNumber: req.body.phoneNumber,
-        // Add email if it's part of the request
-        ...(req.body.email && { email: req.body.email })
-      });
-      await customer.save();
-      console.log('New customer created:', customer);
-    }
-
-    // Create the new bill
-    const newBill = new Billing({
-      customerName: `${customer.firstName} ${customer.lastName}`, // Construct customerName from firstName and lastName
-      phoneNumber: req.body.phoneNumber,
-      services: req.body.services,
-      products: req.body.products, // Add this line if your model includes products
-      subtotal: req.body.subtotal,
-      gst: req.body.gst,
-      grandTotal: req.body.grandTotal,
-      cashback: req.body.cashback || 0,
-      finalTotal: req.body.finalTotal,
-      paymentMethod: req.body.paymentMethod,
-      amountPaid: req.body.amountPaid
-    });
-    
-    const savedBill = await newBill.save();
-    console.log('New bill created:', savedBill);
-    
-    res.status(201).json(savedBill);
-  } catch (error) {
-    console.error('Error creating bill:', error);
-    res.status(400).json({ message: error.message });
-  }
-});
-
-
-// Get all bills
 router.get('/', async (req, res) => {
   try {
-    const bills = await Billing.find();
-    res.json(bills);
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: 'Start date and end date are required' });
+    }
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999); // Include the entire end date
+
+    // Common date match condition
+    const dateMatch = {
+      createdAt: { $gte: start, $lte: end }
+    };
+
+    // 1. Metrics Calculations
+    const metrics = await Promise.all([
+      // Total Sales
+      Billing.aggregate([
+        { $match: dateMatch },
+        {
+          $group: {
+            _id: null,
+            totalSales: { $sum: '$finalTotal' }
+          }
+        }
+      ]),
+
+      // Total Customers (unique customers in period)
+      Billing.aggregate([
+        { $match: dateMatch },
+        {
+          $group: {
+            _id: '$phoneNumber'
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalCustomers: { $sum: 1 }
+          }
+        }
+      ]),
+
+      // Total Service Cost
+      Billing.aggregate([
+        { $match: dateMatch },
+        { $unwind: '$services' },
+        {
+          $group: {
+            _id: null,
+            totalServiceCost: { $sum: '$services.price' }
+          }
+        }
+      ]),
+
+      // Total Customer Visits
+      Billing.aggregate([
+        { $match: dateMatch },
+        {
+          $group: {
+            _id: null,
+            totalVisits: { $sum: 1 }
+          }
+        }
+      ])
+    ]);
+
+    // 2. Charts Data Calculations
+    const chartsData = await Promise.all([
+      // Sales vs Expenses (Daily)
+      Billing.aggregate([
+        { $match: dateMatch },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            sales: { $sum: '$finalTotal' },
+            expenses: { $sum: '$subtotal' } // Assuming cost price or use another field
+          }
+        },
+        { $sort: { '_id': 1 } }
+      ]),
+
+      // Customer Growth
+      Customer.aggregate([
+        {
+          $match: {
+            createdAt: { $gte: start, $lte: end }
+          }
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            newCustomers: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id': 1 } }
+      ]),
+
+      // Employee-Wise Sales
+      Billing.aggregate([
+        { $match: dateMatch },
+        { $unwind: '$services' },
+        {
+          $group: {
+            _id: '$services.staff',
+            revenue: { $sum: '$services.price' }
+          }
+        },
+        { $sort: { revenue: -1 } }
+      ]),
+
+      // Service Distribution
+      Billing.aggregate([
+        { $match: dateMatch },
+        { $unwind: '$services' },
+        {
+          $group: {
+            _id: '$services.name',
+            count: { $sum: 1 },
+            revenue: { $sum: '$services.price' }
+          }
+        },
+        { $sort: { count: -1 } },
+        { $limit: 5 }
+      ]),
+
+      // Top 5 Products
+      Billing.aggregate([
+        { $match: dateMatch },
+        { $unwind: '$products' },
+        {
+          $group: {
+            _id: '$products.name',
+            value: { $sum: { $multiply: ['$products.price', '$products.quantity'] } }
+          }
+        },
+        { $sort: { value: -1 } },
+        { $limit: 5 }
+      ]),
+
+      // Top 5 Customers
+      Billing.aggregate([
+        { $match: dateMatch },
+        {
+          $group: {
+            _id: '$phoneNumber',
+            customerName: { $first: '$customerName' },
+            totalSpent: { $sum: '$finalTotal' },
+            visitCount: { $sum: 1 }
+          }
+        },
+        { $sort: { totalSpent: -1 } },
+        { $limit: 5 }
+      ])
+    ]);
+
+    // Structure the response
+    const dashboardData = {
+      metrics: {
+        totalSales: metrics[0][0]?.totalSales || 0,
+        totalCustomers: metrics[1][0]?.totalCustomers || 0,
+        totalServiceCost: metrics[2][0]?.totalServiceCost || 0,
+        totalVisits: metrics[3][0]?.totalVisits || 0
+      },
+      charts: {
+        salesVsExpenses: chartsData[0].map(item => ({
+          name: item._id,
+          sales: item.sales,
+          expenses: item.expenses
+        })),
+        customerGrowth: chartsData[1].map(item => ({
+          name: item._id,
+          customers: item.newCustomers
+        })),
+        employeeSales: chartsData[2].map(item => ({
+          name: item._id,
+          revenue: item.revenue
+        })),
+        serviceDistribution: chartsData[3].map(item => ({
+          name: item._id,
+          count: item.count,
+          revenue: item.revenue
+        })),
+        topProducts: chartsData[4].map(item => ({
+          name: item._id,
+          value: item.value
+        })),
+        topCustomers: chartsData[5].map(item => ({
+          name: item.customerName,
+          phoneNumber: item._id,
+          value: item.totalSpent,
+          visits: item.visitCount
+        }))
+      }
+    };
+
+    // Add performance metrics if needed
+    const totalDocs = await Billing.countDocuments(dateMatch);
+    dashboardData.performance = {
+      totalDocumentsProcessed: totalDocs
+    };
+
+    res.json(dashboardData);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Dashboard error:', error);
+    res.status(500).json({
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
-// Get a specific bill
-router.get('/:id', async (req, res) => {
+// Additional endpoint for real-time metrics (optional)
+router.get('/realtime', async (req, res) => {
   try {
-    const bill = await Billing.findById(req.params.id);
-    if (!bill) return res.status(404).json({ message: 'Bill not found' });
-    res.json(bill);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-// Update a bill
-router.put('/:id', async (req, res) => {
-  try {
-    const updatedBill = await Billing.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!updatedBill) return res.status(404).json({ message: 'Bill not found' });
-    res.json(updatedBill);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-});
+    const todayMetrics = await Billing.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: today }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          todaySales: { $sum: '$finalTotal' },
+          todayTransactions: { $sum: 1 },
+          todayCustomers: { $addToSet: '$phoneNumber' }
+        }
+      }
+    ]);
 
-// Delete a bill
-router.delete('/:id', async (req, res) => {
-  try {
-    const deletedBill = await Billing.findByIdAndDelete(req.params.id);
-    if (!deletedBill) return res.status(404).json({ message: 'Bill not found' });
-    res.json({ message: 'Bill deleted successfully' });
+    res.json({
+      todaySales: todayMetrics[0]?.todaySales || 0,
+      todayTransactions: todayMetrics[0]?.todayTransactions || 0,
+      todayUniqueCustomers: todayMetrics[0]?.todayCustomers?.length || 0
+    });
   } catch (error) {
+    console.error('Realtime metrics error:', error);
     res.status(500).json({ message: error.message });
   }
 });

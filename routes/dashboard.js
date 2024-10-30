@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const Report = require('../models/Reports'); // Adjust the path as necessary
-const Customer = require('../models/Customer'); // Adjust the path as necessary
+const Report = require('../models/Billing');
+const Customer = require('../models/Customer');
 
 router.get('/', async (req, res) => {
   try {
@@ -13,97 +13,286 @@ router.get('/', async (req, res) => {
 
     const start = new Date(startDate);
     const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999); // Include the entire end date
 
-    // 1. Total Sales
-    const salesData = await Report.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: start, $lte: end }
-        }
-      },
-      // {
-      //   $group: {
-      //     _id: null,
-      //     totalSales: { $sum: '$finalTotal' }
-      //   }
-      // }
-    ]);
-
-    const totalSales = salesData.length > 0 ? salesData[0].totalSales : 0;
-    console.log('Total Sales:', salesData);
-
-    // 2. New Customers
-    const newCustomers = await Customer.countDocuments({
+    // Common match stage for date filtering
+    const dateMatch = {
       createdAt: { $gte: start, $lte: end }
-    });
+    };
 
-    console.log('New Customers:', newCustomers);
+    // 1. Calculate Metrics
+    const [
+      salesData,
+      customerVisits,
+      serviceCosts,
+      totalVisits
+    ] = await Promise.all([
+      // Total Sales
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $group: {
+            _id: null,
+            totalSales: { $sum: '$finalTotal' }
+          }
+        }
+      ]),
 
-    // 3. Employee Services
-    const employeeServices = await Report.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: start, $lte: end }
+      // Unique Customers in Date Range
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $group: {
+            _id: '$phoneNumber',
+            count: { $sum: 1 }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalCustomers: { $sum: 1 }
+          }
         }
-      },
-      {
-        $unwind: '$services'
-      },
-      {
-        $group: {
-          _id: '$services.staff',
-          serviceCount: { $sum: 1 }
+      ]),
+
+      // Total Service Cost
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $unwind: '$services'
+        },
+        {
+          $group: {
+            _id: null,
+            totalServiceCost: { $sum: '$services.price' }
+          }
         }
-      },
-      {
-        $group: {
-          _id: null,
-          totalServices: { $sum: '$serviceCount' }
+      ]),
+
+      // Total Visits (Billings)
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $group: {
+            _id: null,
+            totalVisits: { $sum: 1 }
+          }
         }
-      }
+      ])
     ]);
 
-    const totalEmployeeServices = employeeServices.length > 0 ? employeeServices[0].totalServices : 0;
-    console.log('Total Employee Services:', totalEmployeeServices);
+    // 2. Calculate Chart Data
+    const [
+      salesVsExpenses,
+      customerGrowth,
+      employeeSales,
+      serviceDistribution,
+      topProducts,
+      topCustomers
+    ] = await Promise.all([
+      // Sales vs Expenses Graph Data
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            sales: { $sum: '$finalTotal' },
+            expenses: { $sum: '$subtotal' }
+          }
+        },
+        {
+          $sort: { _id: 1 }
+        },
+        {
+          $project: {
+            _id: 0,
+            name: '$_id',
+            sales: 1,
+            expenses: 1
+          }
+        }
+      ]),
 
-    // 4. Average Service Cost
-    const serviceCostData = await Report.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: start, $lte: end }
+      // Customer Growth Data
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            customers: { $addToSet: '$phoneNumber' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            name: '$_id',
+            customers: { $size: '$customers' }
+          }
+        },
+        {
+          $sort: { name: 1 }
         }
-      },
-      {
-        $unwind: '$services'
-      },
-      {
-        $group: {
-          _id: null,
-          totalServiceCost: { $sum: '$services.price' },
-          totalServices: { $sum: 1 }
+      ]),
+
+      // Employee-wise Sales
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $unwind: '$services'
+        },
+        {
+          $group: {
+            _id: '$services.staff',
+            revenue: { $sum: '$services.price' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            name: '$_id',
+            revenue: 1
+          }
+        },
+        {
+          $sort: { revenue: -1 }
         }
-      }
+      ]),
+
+      // Service Distribution
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $unwind: '$services'
+        },
+        {
+          $group: {
+            _id: '$services.name',
+            count: { $sum: 1 },
+            revenue: { $sum: '$services.price' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            name: '$_id',
+            count: 1,
+            revenue: 1
+          }
+        },
+        {
+          $sort: { count: -1 }
+        },
+        {
+          $limit: 5
+        }
+      ]),
+
+      // Top 5 Products
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $unwind: '$products'
+        },
+        {
+          $group: {
+            _id: '$products.name',
+            value: { $sum: { $multiply: ['$products.price', '$products.quantity'] } },
+            quantity: { $sum: '$products.quantity' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            name: '$_id',
+            value: 1,
+            quantity: 1
+          }
+        },
+        {
+          $sort: { value: -1 }
+        },
+        {
+          $limit: 5
+        }
+      ]),
+
+      // Top 5 Customers
+      Report.aggregate([
+        {
+          $match: dateMatch
+        },
+        {
+          $group: {
+            _id: '$phoneNumber',
+            name: { $first: '$customerName' },
+            value: { $sum: '$finalTotal' },
+            visits: { $sum: 1 }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            phoneNumber: '$_id',
+            name: 1,
+            value: 1,
+            visits: 1
+          }
+        },
+        {
+          $sort: { value: -1 }
+        },
+        {
+          $limit: 5
+        }
+      ])
     ]);
-
-    const averageServiceCost = serviceCostData.length > 0 
-      ? serviceCostData[0].totalServiceCost / serviceCostData[0].totalServices 
-      : 0;
-    console.log('Average Service Cost:', averageServiceCost);
 
     // Prepare the response
     const dashboardData = {
-      totalSales,
-      newCustomers,
-      employeeServices: totalEmployeeServices,
-      averageServiceCost,
+      metrics: {
+        totalSales: salesData[0]?.totalSales || 0,
+        totalCustomers: customerVisits[0]?.totalCustomers || 0,
+        totalServiceCost: serviceCosts[0]?.totalServiceCost || 0,
+        totalVisits: totalVisits[0]?.totalVisits || 0
+      },
+      charts: {
+        salesVsExpenses,
+        customerGrowth,
+        employeeSales,
+        serviceDistribution,
+        topProducts,
+        topCustomers
+      },
+      performance: {
+        totalDocumentsProcessed: totalVisits[0]?.totalVisits || 0
+      }
     };
-
-    console.log('Dashboard Data:', dashboardData);
 
     res.json(dashboardData);
   } catch (error) {
     console.error('Dashboard error:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
