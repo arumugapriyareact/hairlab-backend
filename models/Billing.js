@@ -1,7 +1,11 @@
 const mongoose = require('mongoose');
 
 const billingSchema = new mongoose.Schema({
-  customerName: {
+  firstName: {
+    type: String,
+    required: true
+  },
+  lastName: {
     type: String,
     required: true
   },
@@ -18,8 +22,16 @@ const billingSchema = new mongoose.Schema({
       type: Number,
       required: true
     },
-    staff: {
+    staffName: {
       type: String,
+      required: true
+    },
+    finalPrice:{
+      type: Number,
+      required: true
+    },
+    discount:{
+      type: Number,
       required: true
     },
     duration: Number
@@ -36,7 +48,15 @@ const billingSchema = new mongoose.Schema({
     quantity: {
       type: Number,
       required: true
-    }
+    },
+    discount:{
+      type: Number,
+      required: true
+    },
+    discountPercentage:{
+      type: Number,
+      required: true
+    },
   }],
   subtotal: {
     type: Number,

@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const cors = require('cors');
 
-mongoose.connection.useDb('hairlabtestß');
+mongoose.connection.useDb('hairlabtest');
 
 dotenv.config();
 

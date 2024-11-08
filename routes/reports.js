@@ -1,50 +1,169 @@
 const express = require('express');
 const router = express.Router();
-const Billing = require('../models/Billing');
+const Reports = require('../models/Reports');
 
-// Get all bills
+// Get all reports with filtering and pagination
 router.get('/', async (req, res) => {
     try {
-        console.log('Fetching bills...');
-        const bills = await Billing.find();
-        console.log('Bills fetched:', bills.length);
-        res.status(200).json(bills);
+        const {
+            page = 1,
+            limit = 10,
+            startDate,
+            endDate,
+            phoneNumber,
+            staffName,
+            sortBy = 'date',
+            sortOrder = 'desc'
+        } = req.query;
+
+        // Build query conditions
+        const queryConditions = {};
+
+        if (phoneNumber) {
+            queryConditions.phoneNumber = phoneNumber;
+        }
+
+        if (startDate && endDate) {
+            queryConditions.date = {
+                $gte: new Date(startDate),
+                $lte: new Date(endDate)
+            };
+        }
+
+        if (staffName) {
+            queryConditions['services.staffName'] = staffName;
+        }
+
+        // Execute query with sorting and pagination
+        const reports = await Reports.find(queryConditions)
+            .sort({ [sortBy]: sortOrder === 'desc' ? -1 : 1 })
+            .skip((page - 1) * limit)
+            .limit(parseInt(limit));
+
+        // Get total count for pagination
+        const total = await Reports.countDocuments(queryConditions);
+
+        // Transform data for frontend display
+        const transformedReports = reports.map(report => ({
+            phoneNumber: report.phoneNumber,
+            customerName: report.customerName,
+            services: report.services.map(service => ({
+                name: service.name,
+                price: service.price,
+                discount: service.discount,
+                staffName: service.staffName
+            })),
+            subtotal: report.subtotal,
+            gst: report.gst,
+            grandTotal: report.grandTotal,
+            cashback: report.cashback,
+            referralBonus: report.referralBonus,
+            finalTotal: report.finalTotal,
+            paymentMethod: report.paymentMethod,
+            amountPaid: report.amountPaid,
+            date: report.date
+        }));
+
+        res.status(200).json({
+            reports: transformedReports,
+            pagination: {
+                total,
+                page: parseInt(page),
+                totalPages: Math.ceil(total / limit),
+                limit: parseInt(limit)
+            }
+        });
     } catch (error) {
-        console.error('Error fetching bills:', error);
+        console.error('Error fetching reports:', error);
         res.status(500).json({ message: error.message });
     }
 });
 
-// Edit a bill
-router.put('/:id', async (req, res) => {
+// Generate periodic report (daily/weekly/monthly)
+router.post('/generate/:period', async (req, res) => {
     try {
-        console.log('Updating bill:', req.params.id);
-        const updatedBill = await Billing.findByIdAndUpdate(req.params.id, req.body, { new: true });
-        if (!updatedBill) {
-            return res.status(404).json({ message: 'Bill not found' });
+        const { period } = req.params;
+        let startDate, endDate;
+        const now = new Date();
+
+        // Set date range based on period
+        switch (period) {
+            case 'daily':
+                startDate = new Date(now.setHours(0, 0, 0, 0));
+                endDate = new Date(now.setHours(23, 59, 59, 999));
+                break;
+            case 'weekly':
+                startDate = new Date(now.setDate(now.getDate() - now.getDay()));
+                endDate = new Date(now);
+                endDate.setDate(startDate.getDate() + 6);
+                endDate.setHours(23, 59, 59, 999);
+                break;
+            case 'monthly':
+                startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+                endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+                break;
+            default:
+                return res.status(400).json({ message: 'Invalid period specified' });
         }
-        console.log('Bill updated:', updatedBill);
-        res.status(200).json(updatedBill);
+
+        // Get all transactions for the period
+        const transactions = await Reports.find({
+            date: {
+                $gte: startDate,
+                $lte: endDate
+            }
+        });
+
+        // Generate analytics data
+        const analyticsData = transactions.reduce((acc, transaction) => {
+            // Calculate revenues
+            acc.serviceRevenue += transaction.calculateServiceRevenue();
+            acc.productRevenue += transaction.calculateProductRevenue();
+            
+            // Add discounts
+            const discounts = transaction.calculateTotalDiscounts();
+            acc.totalDiscounts.services += discounts.services;
+            acc.totalDiscounts.products += discounts.products;
+            
+            // Staff performance
+            transaction.services.forEach(service => {
+                const staffData = acc.staffPerformance.find(s => s.staffName === service.staffName);
+                if (staffData) {
+                    staffData.serviceCount++;
+                    staffData.revenue += service.price - service.discount;
+                    staffData.totalDiscounts += service.discount;
+                } else {
+                    acc.staffPerformance.push({
+                        staffId: service.staffId,
+                        staffName: service.staffName,
+                        serviceCount: 1,
+                        revenue: service.price - service.discount,
+                        totalDiscounts: service.discount
+                    });
+                }
+            });
+
+            return acc;
+        }, {
+            serviceRevenue: 0,
+            productRevenue: 0,
+            totalDiscounts: { services: 0, products: 0 },
+            staffPerformance: []
+        });
+
+        res.status(200).json({
+            period,
+            startDate,
+            endDate,
+            analyticsData,
+            transactionCount: transactions.length
+        });
     } catch (error) {
-        console.error('Error updating bill:', error);
+        console.error(`Error generating ${req.params.period} report:`, error);
         res.status(500).json({ message: error.message });
     }
 });
 
-// Delete a bill
-router.delete('/:id', async (req, res) => {
-    try {
-        console.log('Deleting bill:', req.params.id);
-        const deletedBill = await Billing.findByIdAndDelete(req.params.id);
-        if (!deletedBill) {
-            return res.status(404).json({ message: 'Bill not found' });
-        }
-        console.log('Bill deleted:', deletedBill);
-        res.status(200).json({ message: 'Bill deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting bill:', error);
-        res.status(500).json({ message: error.message });
-    }
-});
+// Additional routes remain the same...
 
 module.exports = router;
