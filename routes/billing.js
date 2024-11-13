@@ -1,264 +1,140 @@
 const express = require('express');
 const router = express.Router();
-const Billing = require('../models/Billing');
-const Customer = require('../models/Customer');
+const { Billing, Customer } = require('../models/Billing');
+const mongoose = require('mongoose');
 
-// Dashboard metrics route
-router.get('/', async (req, res) => {
+// Create new billing record
+router.post('/', async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { customer, services, products, billing } = req.body;
 
-    if (!startDate || !endDate) {
-      return res.status(400).json({ message: 'Start date and end date are required' });
+    // Basic validation
+    if (!customer.phoneNumber || customer.phoneNumber.length !== 10) {
+      return res.status(400).json({ message: 'Valid 10-digit phone number is required' });
     }
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
+    if ((!services || !services.length) && (!products || !products.length)) {
+      return res.status(400).json({ message: 'At least one service or product is required' });
+    }
 
-    const dateMatch = {
-      createdAt: { $gte: start, $lte: end }
-    };
-
-    // 1. Metrics Calculations
-    const metrics = await Promise.all([
-      // Total Sales
-      Billing.aggregate([
-        { $match: dateMatch },
-        {
-          $group: {
-            _id: null,
-            totalSales: { $sum: '$finalTotal' }
-          }
+    // Validate services if present
+    if (services && services.length > 0) {
+      for (const service of services) {
+        if (!service.serviceId || !service.name || !service.staffId || !service.staffName || typeof service.finalPrice !== 'number') {
+          return res.status(400).json({
+            message: 'Each service must have serviceId, name, staffId, staffName, and finalPrice'
+          });
         }
-      ]),
-
-      // Total Customers (unique customers in period)
-      Billing.aggregate([
-        { $match: dateMatch },
-        {
-          $group: {
-            _id: '$phoneNumber'
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalCustomers: { $sum: 1 }
-          }
-        }
-      ]),
-
-      // Total Service Revenue
-      Billing.aggregate([
-        { $match: dateMatch },
-        { $unwind: '$services' },
-        {
-          $group: {
-            _id: null,
-            totalServiceRevenue: { $sum: '$services.finalPrice' }
-          }
-        }
-      ]),
-
-      // Total Customer Visits
-      Billing.aggregate([
-        { $match: dateMatch },
-        {
-          $group: {
-            _id: null,
-            totalVisits: { $sum: 1 }
-          }
-        }
-      ]),
-
-      // Total Discounts Given
-      Billing.aggregate([
-        { $match: dateMatch },
-        {
-          $group: {
-            _id: null,
-            serviceDiscounts: {
-              $sum: {
-                $reduce: {
-                  input: '$services',
-                  initialValue: 0,
-                  in: { $add: ['$$value', '$$this.discount'] }
-                }
-              }
-            },
-            productDiscounts: {
-              $sum: {
-                $reduce: {
-                  input: '$products',
-                  initialValue: 0,
-                  in: { $add: ['$$value', '$$this.discount'] }
-                }
-              }
-            }
-          }
-        }
-      ])
-    ]);
-
-    // 2. Charts Data Calculations
-    const chartsData = await Promise.all([
-      // Sales vs Expenses (Daily)
-      Billing.aggregate([
-        { $match: dateMatch },
-        {
-          $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-            sales: { $sum: '$finalTotal' },
-            expenses: { $sum: '$subtotal' }
-          }
-        },
-        { $sort: { '_id': 1 } }
-      ]),
-
-      // Customer Growth
-      Customer.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: start, $lte: end }
-          }
-        },
-        {
-          $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-            newCustomers: { $sum: 1 }
-          }
-        },
-        { $sort: { '_id': 1 } }
-      ]),
-
-      // Employee-Wise Sales
-      Billing.aggregate([
-        { $match: dateMatch },
-        { $unwind: '$services' },
-        {
-          $group: {
-            _id: '$services.staffName',
-            revenue: { $sum: '$services.finalPrice' },
-            totalDiscounts: { $sum: '$services.discount' },
-            serviceCount: { $sum: 1 }
-          }
-        },
-        { $sort: { revenue: -1 } }
-      ]),
-
-      // Service Distribution
-      Billing.aggregate([
-        { $match: dateMatch },
-        { $unwind: '$services' },
-        {
-          $group: {
-            _id: '$services.name',
-            count: { $sum: 1 },
-            revenue: { $sum: '$services.finalPrice' },
-            totalDiscounts: { $sum: '$services.discount' }
-          }
-        },
-        { $sort: { count: -1 } },
-        { $limit: 5 }
-      ]),
-
-      // Top 5 Products
-      Billing.aggregate([
-        { $match: dateMatch },
-        { $unwind: '$products' },
-        {
-          $group: {
-            _id: '$products.name',
-            value: {
-              $sum: {
-                $multiply: [
-                  { $subtract: ['$products.price', '$products.discount'] },
-                  '$products.quantity'
-                ]
-              }
-            },
-            quantity: { $sum: '$products.quantity' },
-            totalDiscounts: { $sum: '$products.discount' }
-          }
-        },
-        { $sort: { value: -1 } },
-        { $limit: 5 }
-      ]),
-
-      // Top 5 Customers
-      Billing.aggregate([
-        { $match: dateMatch },
-        {
-          $group: {
-            _id: '$phoneNumber',
-            firstName: { $first: '$firstName' },
-            lastName: { $first: '$lastName' },
-            totalSpent: { $sum: '$finalTotal' },
-            visitCount: { $sum: 1 }
-          }
-        },
-        { $sort: { totalSpent: -1 } },
-        { $limit: 5 }
-      ])
-    ]);
-
-    const dashboardData = {
-      metrics: {
-        totalSales: metrics[0][0]?.totalSales || 0,
-        totalCustomers: metrics[1][0]?.totalCustomers || 0,
-        totalServiceRevenue: metrics[2][0]?.totalServiceRevenue || 0,
-        totalVisits: metrics[3][0]?.totalVisits || 0,
-        totalDiscounts: {
-          services: metrics[4][0]?.serviceDiscounts || 0,
-          products: metrics[4][0]?.productDiscounts || 0
-        }
-      },
-      charts: {
-        salesVsExpenses: chartsData[0].map(item => ({
-          name: item._id,
-          sales: item.sales,
-          expenses: item.expenses
-        })),
-        customerGrowth: chartsData[1].map(item => ({
-          name: item._id,
-          customers: item.newCustomers
-        })),
-        employeeSales: chartsData[2].map(item => ({
-          name: item._id,
-          revenue: item.revenue,
-          discounts: item.totalDiscounts,
-          serviceCount: item.serviceCount
-        })),
-        serviceDistribution: chartsData[3].map(item => ({
-          name: item._id,
-          count: item.count,
-          revenue: item.revenue,
-          discounts: item.totalDiscounts
-        })),
-        topProducts: chartsData[4].map(item => ({
-          name: item._id,
-          value: item.value,
-          quantity: item.quantity,
-          discounts: item.totalDiscounts
-        })),
-        topCustomers: chartsData[5].map(item => ({
-          name: `${item.firstName} ${item.lastName}`,
-          phoneNumber: item._id,
-          value: item.totalSpent,
-          visits: item.visitCount
-        }))
       }
-    };
+    }
 
-    const totalDocs = await Billing.countDocuments(dateMatch);
-    dashboardData.performance = {
-      totalDocumentsProcessed: totalDocs
-    };
+    // Validate products if present
+    if (products && products.length > 0) {
+      for (const product of products) {
+        if (!product.productId || !product.name || typeof product.price !== 'number' || !product.quantity) {
+          return res.status(400).json({
+            message: 'Each product must have productId, name, price, and quantity'
+          });
+        }
+      }
+    }
 
-    res.json(dashboardData);
+    // Create new billing record
+    const newBilling = new Billing({
+      firstName: customer.firstName,
+      lastName: customer.lastName,
+      phoneNumber: customer.phoneNumber,
+      email: customer.email,
+      dob: customer.dob ? new Date(customer.dob) : undefined,
+      services: services.map(service => ({
+        serviceId: service.serviceId,
+        name: service.name,
+        price: Math.round(service.price),
+        staffId: service.staffId,
+        staffName: service.staffName,
+        finalPrice: Math.round(service.finalPrice),
+        discount: Math.round(service.discount || 0)
+      })),
+      products: products.map(product => ({
+        productId: product.productId,
+        name: product.name,
+        price: Math.round(product.price),
+        quantity: product.quantity,
+        discount: Math.round(product.discount || 0),
+        discountPercentage: Math.round(product.discountPercentage || 0),
+        finalPrice: Math.round(product.finalPrice)
+      })),
+      subtotal: Math.round(billing.subtotal),
+      gstPercentage: billing.gstPercentage,
+      gst: Math.round(billing.gst),
+      grandTotal: Math.round(billing.grandTotal),
+      cashback: Math.round(billing.cashback || 0),
+      finalTotal: Math.round(billing.finalTotal),
+      paymentMethod: billing.paymentMethod,
+      amountPaid: Math.round(billing.amountPaid)
+    });
+
+    const savedBilling = await newBilling.save();
+
+    // Update or create customer record
+    try {
+      let customerRecord = await Customer.findOne({ phoneNumber: customer.phoneNumber });
+      const billingDate = new Date();
+
+      if (!customerRecord) {
+        customerRecord = new Customer({
+          firstName: customer.firstName,
+          lastName: customer.lastName,
+          phoneNumber: customer.phoneNumber,
+          email: customer.email,
+          dob: customer.dob ? new Date(customer.dob) : undefined,
+          totalVisits: 1,
+          totalSpent: billing.finalTotal,
+          lastVisit: billingDate
+        });
+      } else {
+        customerRecord.totalVisits += 1;
+        customerRecord.totalSpent += billing.finalTotal;
+        customerRecord.lastVisit = billingDate;
+        
+        // Update customer details if provided
+        if (customer.firstName) customerRecord.firstName = customer.firstName;
+        if (customer.lastName) customerRecord.lastName = customer.lastName;
+        if (customer.email) customerRecord.email = customer.email;
+        if (customer.dob) customerRecord.dob = new Date(customer.dob);
+      }
+
+      await customerRecord.save();
+    } catch (customerError) {
+      console.error('Error updating customer record:', customerError);
+      // Don't fail the billing creation if customer update fails
+    }
+
+    res.status(201).json({
+      message: 'Billing record created successfully',
+      billing: {
+        id: savedBilling._id,
+        customerName: savedBilling.customerName,
+        phoneNumber: savedBilling.phoneNumber,
+        services: savedBilling.services,
+        products: savedBilling.products,
+        paymentDetails: {
+          subtotal: savedBilling.subtotal,
+          gstPercentage: savedBilling.gstPercentage,
+          gst: savedBilling.gst,
+          grandTotal: savedBilling.grandTotal,
+          cashback: savedBilling.cashback,
+          finalTotal: savedBilling.finalTotal,
+          paymentMethod: savedBilling.paymentMethod,
+          amountPaid: savedBilling.amountPaid
+        },
+        totalDiscount: savedBilling.getTotalDiscount(),
+        createdAt: savedBilling.createdAt
+      }
+    });
+
   } catch (error) {
-    console.error('Dashboard error:', error);
+    console.error('Create billing error:', error);
     res.status(500).json({
       message: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -266,61 +142,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Realtime metrics route
-router.get('/realtime', async (req, res) => {
-  try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const todayMetrics = await Billing.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: today }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          todaySales: { $sum: '$finalTotal' },
-          todayTransactions: { $sum: 1 },
-          todayCustomers: { $addToSet: '$phoneNumber' },
-          todayDiscounts: {
-            $sum: {
-              $add: [
-                {
-                  $reduce: {
-                    input: '$services',
-                    initialValue: 0,
-                    in: { $add: ['$$value', '$$this.discount'] }
-                  }
-                },
-                {
-                  $reduce: {
-                    input: '$products',
-                    initialValue: 0,
-                    in: { $add: ['$$value', '$$this.discount'] }
-                  }
-                }
-              ]
-            }
-          }
-        }
-      }
-    ]);
-
-    res.json({
-      todaySales: todayMetrics[0]?.todaySales || 0,
-      todayTransactions: todayMetrics[0]?.todayTransactions || 0,
-      todayUniqueCustomers: todayMetrics[0]?.todayCustomers?.length || 0,
-      todayTotalDiscounts: todayMetrics[0]?.todayDiscounts || 0
-    });
-  } catch (error) {
-    console.error('Realtime metrics error:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// List all billings route
+// Get billing list with filters and pagination
 router.get('/list', async (req, res) => {
   try {
     const {
@@ -334,158 +156,139 @@ router.get('/list', async (req, res) => {
       paymentMethod,
       staffName,
       serviceName,
-      productName
+      productName,
+      minAmount,
+      maxAmount
     } = req.query;
 
     // Build match conditions
     const matchConditions = {};
 
     // Date filtering
-    if (startDate && endDate) {
-      const start = new Date(startDate);
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      matchConditions.createdAt = { $gte: start, $lte: end };
+    if (startDate || endDate) {
+      matchConditions.createdAt = {};
+      if (startDate) {
+        matchConditions.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        const endDateTime = new Date(endDate);
+        endDateTime.setHours(23, 59, 59, 999);
+        matchConditions.createdAt.$lte = endDateTime;
+      }
     }
 
-    // Phone number filtering
-    if (phoneNumber) {
-      matchConditions.phoneNumber = phoneNumber;
+    // Amount range filtering
+    if (minAmount || maxAmount) {
+      matchConditions.finalTotal = {};
+      if (minAmount) matchConditions.finalTotal.$gte = parseInt(minAmount);
+      if (maxAmount) matchConditions.finalTotal.$lte = parseInt(maxAmount);
     }
 
-    // Payment method filtering
-    if (paymentMethod && ['cash', 'card', 'upi'].includes(paymentMethod)) {
-      matchConditions.paymentMethod = paymentMethod;
-    }
-
-    // Staff name filtering
-    if (staffName) {
-      matchConditions['services.staffName'] = staffName;
-    }
-
-    // Service name filtering
-    if (serviceName) {
-      matchConditions['services.name'] = serviceName;
-    }
-
-    // Product name filtering
-    if (productName) {
-      matchConditions['products.name'] = productName;
-    }
+    // Other filters
+    if (phoneNumber) matchConditions.phoneNumber = phoneNumber;
+    if (paymentMethod) matchConditions.paymentMethod = paymentMethod;
+    if (staffName) matchConditions['services.staffName'] = new RegExp(staffName, 'i');
+    if (serviceName) matchConditions['services.name'] = new RegExp(serviceName, 'i');
+    if (productName) matchConditions['products.name'] = new RegExp(productName, 'i');
 
     // Build aggregation pipeline
     const pipeline = [
       { $match: matchConditions },
       {
-        $project: {
-          firstName: 1,
-          lastName: 1,
-          phoneNumber: 1,
-          services: {
-            $map: {
-              input: '$services',
-              as: 'service',
-              in: {
-                name: '$$service.name',
-                price: '$$service.price',
-                staffName: '$$service.staffName',
-                finalPrice: '$$service.finalPrice',
-                discount: '$$service.discount',
-                duration: '$$service.duration'
-              }
-            }
-          },
-          products: {
-            $map: {
-              input: '$products',
-              as: 'product',
-              in: {
-                name: '$$product.name',
-                price: '$$product.price',
-                quantity: '$$product.quantity',
-                discount: '$$product.discount',
-                discountPercentage: '$$product.discountPercentage'
-              }
-            }
-          },
-          subtotal: 1,
-          gst: 1,
-          grandTotal: 1,
-          cashback: 1,
-          finalTotal: 1,
-          paymentMethod: 1,
-          amountPaid: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          totalServiceDiscount: {
-            $reduce: {
-              input: '$services',
-              initialValue: 0,
-              in: { $add: ['$$value', '$$this.discount'] }
-            }
-          },
-          totalProductDiscount: {
-            $reduce: {
-              input: '$products',
-              initialValue: 0,
-              in: { $add: ['$$value', '$$this.discount'] }
-            }
-          }
-        }
-      },
-      {
         $addFields: {
-          totalDiscount: { $add: ['$totalServiceDiscount', '$totalProductDiscount'] },
-          customerName: { $concat: ['$firstName', ' ', '$lastName'] }
+          customerName: {
+            $trim: {
+              input: {
+                $concat: [
+                  { $ifNull: ['$firstName', ''] },
+                  ' ',
+                  { $ifNull: ['$lastName', ''] }
+                ]
+              }
+            }
+          },
+          totalDiscount: {
+            $add: [
+              {
+                $reduce: {
+                  input: '$services',
+                  initialValue: 0,
+                  in: { $add: ['$$value', { $ifNull: ['$$this.discount', 0] }] }
+                }
+              },
+              {
+                $reduce: {
+                  input: '$products',
+                  initialValue: 0,
+                  in: {
+                    $add: [
+                      '$$value',
+                      {
+                        $multiply: [
+                          { $ifNull: ['$$this.discount', 0] },
+                          { $ifNull: ['$$this.quantity', 1] }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     ];
 
     // Add sorting
-    const sortField = sortBy === 'customerName' ? 'firstName' : sortBy;
+    const sortField = sortBy === 'customerName' ? 'customerName' : sortBy;
     pipeline.push({ $sort: { [sortField]: sortOrder === 'desc' ? -1 : 1 } });
 
     // Get total count before pagination
-    const totalDocs = await Billing.aggregate([
-      ...pipeline,
-      { $count: 'total' }
-    ]);
+    const totalDocs = await Billing.aggregate([...pipeline, { $count: 'total' }]);
+    const total = totalDocs[0]?.total || 0;
 
     // Add pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    pipeline.push(
-      { $skip: skip },
-      { $limit: parseInt(limit) }
-    );
+    pipeline.push({ $skip: skip }, { $limit: parseInt(limit) });
 
-    // Execute aggregation
+    // Execute query
     const billings = await Billing.aggregate(pipeline);
+
+    // Calculate summary statistics
+    const summaryPipeline = [
+      { $match: matchConditions },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$finalTotal' },
+          totalBills: { $sum: 1 },
+          averageBillValue: { $avg: '$finalTotal' },
+          totalServices: { $sum: { $size: '$services' } },
+          totalProducts: { $sum: { $size: '$products' } }
+        }
+      }
+    ];
+
+    const summaryStats = await Billing.aggregate(summaryPipeline);
+    const summary = summaryStats[0] || {
+      totalRevenue: 0,
+      totalBills: 0,
+      averageBillValue: 0,
+      totalServices: 0,
+      totalProducts: 0
+    };
 
     // Format response
     const response = {
       billings: billings.map(billing => ({
         id: billing._id,
-        customerName: billing.customerName,
-        firstName: billing.firstName,
-        lastName: billing.lastName,
+        customerName: billing.customerName.trim() || 'Anonymous',
         phoneNumber: billing.phoneNumber,
-        services: billing.services.map(service => ({
-          name: service.name,
-          price: service.price,
-          staffName: service.staffName,
-          finalPrice: service.finalPrice,
-          discount: service.discount,
-          duration: service.duration
-        })),
-        products: billing.products.map(product => ({
-          name: product.name,
-          price: product.price,
-          quantity: product.quantity,
-          discount: product.discount,
-          discountPercentage: product.discountPercentage
-        })),
+        services: billing.services,
+        products: billing.products,
         paymentDetails: {
           subtotal: billing.subtotal,
+          gstPercentage: billing.gstPercentage,
           gst: billing.gst,
           grandTotal: billing.grandTotal,
           cashback: billing.cashback,
@@ -493,228 +296,144 @@ router.get('/list', async (req, res) => {
           paymentMethod: billing.paymentMethod,
           amountPaid: billing.amountPaid
         },
-        discounts: {
-          serviceDiscount: billing.totalServiceDiscount,
-          productDiscount: billing.totalProductDiscount,
-          totalDiscount: billing.totalDiscount
-        },
-        createdAt: billing.createdAt,
-        updatedAt: billing.updatedAt
+        totalDiscount: billing.totalDiscount,
+        createdAt: billing.createdAt
       })),
+      summary: {
+        totalRevenue: Math.round(summary.totalRevenue),
+        totalBills: summary.totalBills,
+        averageBillValue: Math.round(summary.averageBillValue),
+        totalServices: summary.totalServices,
+        totalProducts: summary.totalProducts
+      },
       pagination: {
-        total: totalDocs[0]?.total || 0,
+        total,
         page: parseInt(page),
         limit: parseInt(limit),
-        pages: Math.ceil((totalDocs[0]?.total || 0) / parseInt(limit))
+        pages: Math.ceil(total / parseInt(limit))
       }
     };
 
     res.json(response);
   } catch (error) {
     console.error('List billings error:', error);
-    res.status(500).json({
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+    res.status(500).json({ message: error.message });
   }
 });
 
-// Create new billing record
-router.post('/', async (req, res) => {
+// Get detailed billing record by ID
+router.get('/:id', async (req, res) => {
   try {
-    const {
-      firstName,
-      lastName,
-      phoneNumber,
-      services,
-      products,
-      subtotal,
-      gst,
-      grandTotal,
-      cashback,
-      finalTotal,
-      paymentMethod,
-      amountPaid
-    } = req.body;
-
-    // Validate required fields
-    if (!firstName || !lastName || !phoneNumber) {
-      return res.status(400).json({ message: 'First name, last name, and phone number are required' });
+    const billing = await Billing.findById(req.params.id);
+    
+    if (!billing) {
+      return res.status(404).json({ message: 'Billing record not found' });
     }
 
-    if (!services || !Array.isArray(services) || services.length === 0) {
-      return res.status(400).json({ message: 'At least one service is required' });
-    }
-
-    // Validate services with updated fields
-    for (const service of services) {
-      if (!service.name || !service.price || !service.staffName ||
-        typeof service.finalPrice !== 'number' || typeof service.discount !== 'number') {
-        return res.status(400).json({
-          message: 'Each service must have name, price, staffName, finalPrice, and discount'
-        });
-      }
-
-      // Validate price and discount relationships
-      if (service.price < service.discount) {
-        return res.status(400).json({
-          message: 'Service discount cannot be greater than price'
-        });
-      }
-
-      if (service.finalPrice !== service.price - service.discount) {
-        return res.status(400).json({
-          message: 'Service finalPrice must equal price minus discount'
-        });
-      }
-    }
-
-    // Validate products with updated fields
-    if (products && Array.isArray(products)) {
-      for (const product of products) {
-        if (!product.name || !product.price || !product.quantity ||
-          typeof product.discount !== 'number' || typeof product.discountPercentage !== 'number') {
-          return res.status(400).json({
-            message: 'Each product must have name, price, quantity, discount, and discountPercentage'
-          });
-        }
-
-        // Validate price and discount relationships
-        if (product.price < product.discount) {
-          return res.status(400).json({
-            message: 'Product discount cannot be greater than price'
-          });
-        }
-
-        // Validate discount percentage
-        const calculatedDiscount = (product.price * product.discountPercentage) / 100;
-        if (Math.abs(calculatedDiscount - product.discount) > 0.01) { // Allow small rounding differences
-          return res.status(400).json({
-            message: 'Product discount does not match the discount percentage'
-          });
-        }
-      }
-    }
-
-    // Validate payment details
-    if (!['cash', 'card', 'upi'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Invalid payment method' });
-    }
-
-    if (typeof amountPaid !== 'number' || amountPaid < 0) {
-      return res.status(400).json({ message: 'Invalid amount paid' });
-    }
-
-    // Validate totals
-    if (typeof subtotal !== 'number' || typeof gst !== 'number' ||
-      typeof grandTotal !== 'number' || typeof finalTotal !== 'number') {
-      return res.status(400).json({ message: 'Invalid total amounts' });
-    }
-
-    // Validate total calculations
-    const calculatedServiceTotal = services.reduce((sum, service) => sum + service.finalPrice, 0);
-    const calculatedProductTotal = products ? products.reduce((sum, product) =>
-      sum + (product.price - product.discount) * product.quantity, 0) : 0;
-
-    const calculatedSubtotal = calculatedServiceTotal + calculatedProductTotal;
-
-    // if (Math.abs(calculatedSubtotal - subtotal) > 0.01) {
-    //   return res.status(400).json({ message: 'Subtotal does not match calculated total' });
-    // }
-
-    const calculatedGrandTotal = subtotal + gst;
-    // if (Math.abs(calculatedGrandTotal - grandTotal) > 0.01) {
-    //   return res.status(400).json({ message: 'Grand total does not match calculated total' });
-    // }
-
-    const calculatedFinalTotal = grandTotal - (cashback || 0);
-    // if (Math.abs(calculatedFinalTotal - finalTotal) > 0.01) {
-    //   return res.status(400).json({ message: 'Final total does not match calculated total' });
-    // }
-
-    // Create new billing record
-    const newBilling = new Billing({
-      firstName,
-      lastName,
-      phoneNumber,
-      services: services.map(service => ({
-        name: service.name,
-        price: service.price,
-        staffName: service.staffName,
-        finalPrice: service.finalPrice,
-        discount: service.discount,
-        duration: service.duration
-      })),
-      products: products ? products.map(product => ({
-        name: product.name,
-        price: product.price,
-        quantity: product.quantity,
-        discount: product.discount,
-        discountPercentage: product.discountPercentage
-      })) : [],
-      subtotal,
-      gst,
-      grandTotal,
-      cashback: cashback || 0,
-      finalTotal,
-      paymentMethod,
-      amountPaid
+    res.json({
+      id: billing._id,
+      customerInfo: {
+        name: billing.customerName,
+        phoneNumber: billing.phoneNumber,
+        email: billing.email,
+        dob: billing.dob
+      },
+      services: billing.services,
+      products: billing.products,
+      paymentDetails: {
+        subtotal: billing.subtotal,
+        gstPercentage: billing.gstPercentage,
+        gst: billing.gst,
+        grandTotal: billing.grandTotal,
+        cashback: billing.cashback,
+        finalTotal: billing.finalTotal,
+        paymentMethod: billing.paymentMethod,
+        amountPaid: billing.amountPaid
+      },
+      totalDiscount: billing.getTotalDiscount(),
+      createdAt: billing.createdAt,
+      updatedAt: billing.updatedAt
     });
-
-    // Save the billing record
-    const savedBilling = await newBilling.save();
-
-    // Try to find or create/update customer record
-    try {
-      const existingCustomer = await Customer.findOne({ phoneNumber });
-      if (!existingCustomer) {
-        const newCustomer = new Customer({
-          firstName,
-          lastName,
-          phoneNumber
-        });
-        await newCustomer.save();
-      } else if (existingCustomer.firstName !== firstName || existingCustomer.lastName !== lastName) {
-        // Update customer name if it has changed
-        existingCustomer.firstName = firstName;
-        existingCustomer.lastName = lastName;
-        await existingCustomer.save();
-      }
-    } catch (customerError) {
-      console.error('Error handling customer record:', customerError);
-    }
-
-    // Return success response with detailed billing information
-    res.status(201).json({
-      message: 'Billing record created successfully',
-      billing: {
-        id: savedBilling._id,
-        customerName: `${savedBilling.firstName} ${savedBilling.lastName}`,
-        firstName: savedBilling.firstName,
-        lastName: savedBilling.lastName,
-        phoneNumber: savedBilling.phoneNumber,
-        services: savedBilling.services,
-        products: savedBilling.products,
-        paymentDetails: {
-          subtotal: savedBilling.subtotal,
-          gst: savedBilling.gst,
-          grandTotal: savedBilling.grandTotal,
-          cashback: savedBilling.cashback,
-          finalTotal: savedBilling.finalTotal,
-          paymentMethod: savedBilling.paymentMethod,
-          amountPaid: savedBilling.amountPaid
-        },
-        createdAt: savedBilling.createdAt,
-        updatedAt: savedBilling.updatedAt
-      }
-    });
-
   } catch (error) {
-    console.error('Create billing error:', error);
-    res.status(500).json({
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    console.error('Get billing error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get billing summary statistics
+router.get('/stats/summary', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.createdAt = {};
+      if (startDate) {
+        matchConditions.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        const endDateTime = new Date(endDate);
+        endDateTime.setHours(23, 59, 59, 999);
+        matchConditions.createdAt.$lte = endDateTime;
+      }
+    }
+
+    const summary = await Billing.aggregate([
+      { $match: matchConditions },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$finalTotal' },
+          totalBills: { $sum: 1 },
+          averageBillValue: { $avg: '$finalTotal' },
+          totalServices: { $sum: { $size: '$services' } },
+          totalProducts: { $sum: { $size: '$products' } },
+          totalDiscount: {
+            $sum: {
+              $add: [
+                {
+                  $reduce: {
+                    input: '$services',
+                    initialValue: 0,
+                    in: { $add: ['$$value', '$$this.discount'] }
+                  }
+                },
+                {
+                  $reduce: {
+                    input: '$products',
+                    initialValue: 0,
+                    in: { $add: ['$$value', { $multiply: ['$$this.discount', '$$this.quantity'] }] }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          totalRevenue: { $round: ['$totalRevenue', 0] },
+          totalBills: 1,
+          averageBillValue: { $round: ['$averageBillValue', 0] },
+          totalServices: 1,
+          totalProducts: 1,
+          totalDiscount: { $round: ['$totalDiscount', 0] }
+        }
+      }
+    ]);
+
+    res.json(summary[0] || {
+      totalRevenue: 0,
+      totalBills: 0,
+      averageBillValue: 0,
+      totalServices: 0,
+      totalProducts: 0,
+      totalDiscount: 0
     });
+  } catch (error) {
+    console.error('Get billing statistics error:', error);
+    res.status(500).json({ message: error.message });
   }
 });
 

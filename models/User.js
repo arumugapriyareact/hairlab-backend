@@ -29,7 +29,7 @@ const UserSchema = new mongoose.Schema({
     },
     branch: { 
         type: String, 
-        required: true 
+        required: false 
     },
     status: {
         type: String,
@@ -43,7 +43,9 @@ const UserSchema = new mongoose.Schema({
     updatedAt: { 
         type: Date, 
         default: Date.now 
-    }
+    },
+    resetPasswordToken: String,
+    resetPasswordExpires: Date,
 });
 
 // Update the updatedAt timestamp before saving

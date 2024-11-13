@@ -1,1 +1,16 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Uploaded files
+public/uploads/**/*
+!public/uploads/**/.gitkeep
+
+# Logs
+*.log
+
+# IDE files
+.vscode/
+.idea/
