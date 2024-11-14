@@ -1,102 +1,127 @@
 const express = require('express');
 const router = express.Router();
 const Appointment = require('../models/Appointments');
-const Service = require('../models/Service');
-const Customer = require('../models/Customer'); // Import the Customer model
+const Customer = require('../models/Customer');
 
 // GET all appointments
 router.get('/', async (req, res) => {
     try {
         const appointments = await Appointment.find()
-            .populate('customer', 'firstName lastName')
-            .populate('service', 'serviceName')
-            .populate('staff', 'firstName lastName');
+            .populate('customer')
+            .populate('service')
+            .populate('staff')
+            .sort({ dateTime: 1 });
         res.json(appointments);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
-
 // POST a new appointment
 router.post('/', async (req, res) => {
     try {
-        // Check if customer exists
-        let customer = await Customer.findOne({ phoneNumber: req.body.phoneNumber });
+        const { customer, service, staff, dateTime, notes, status } = req.body;
         
-        if (!customer) {
-            // If customer doesn't exist, create a new one
-            customer = new Customer({
-                firstName: req.body.firstName,
-                lastName: req.body.lastName,
-                phoneNumber: req.body.phoneNumber,
-                // Add email if it's part of the request
-                ...(req.body.email && { email: req.body.email })
+        // Find or create customer
+        let customerDoc = await Customer.findOne({ 
+            phoneNumber: customer.phoneNumber 
+        });
+
+        if (!customerDoc) {
+            customerDoc = await Customer.create({
+                firstName: customer.firstName,
+                lastName: customer.lastName,
+                phoneNumber: customer.phoneNumber,
+                email: customer.email
             });
-            await customer.save();
-            console.log('New customer created:', customer);
         }
 
-        // Create the new appointment
+        // Create appointment
         const appointment = new Appointment({
-            customer: customer._id, // Use the customer's ID
-            service: req.body.service,
-            staff: req.body.staff,
-            dateTime: req.body.dateTime,
-            notes: req.body.notes
+            customer: customerDoc._id,
+            service: service,
+            staff: staff,
+            dateTime: dateTime,
+            notes: notes,
+            status: status || 'confirmed'
         });
 
         const newAppointment = await appointment.save();
-        console.log('New appointment created:', newAppointment);
         
-        res.status(201).json(newAppointment);
+        // Populate the response
+        const populatedAppointment = await Appointment.findById(newAppointment._id)
+            .populate('customer')
+            .populate('service')
+            .populate('staff');
+
+        res.status(201).json(populatedAppointment);
     } catch (error) {
-        console.error('Error creating appointment:', error);
         res.status(400).json({ message: error.message });
     }
 });
 
-// GET a specific appointment
-router.get('/:id', async (req, res) => {
-    try {
-        const appointment = await Appointment.findById(req.params.id)
-            .populate('customer', 'firstName lastName phoneNumber email')
-            .populate('service', 'serviceName')
-            .populate('staff', 'firstName lastName');
-        if (appointment == null) {
-            return res.status(404).json({ message: 'Appointment not found' });
-        }
-        res.json(appointment);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-});
-
-// PUT to update an appointment
+// PUT update appointment
 router.put('/:id', async (req, res) => {
     try {
-        const updatedAppointment = await Appointment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const { customer, service, staff, dateTime, notes, status } = req.body;
+        
+        // Update or create customer
+        let customerDoc = await Customer.findOne({ 
+            phoneNumber: customer.phoneNumber 
+        });
+
+        if (!customerDoc) {
+            customerDoc = await Customer.create({
+                firstName: customer.firstName,
+                lastName: customer.lastName,
+                phoneNumber: customer.phoneNumber,
+                email: customer.email
+            });
+        } else {
+            // Update existing customer details
+            customerDoc.firstName = customer.firstName;
+            customerDoc.lastName = customer.lastName;
+            customerDoc.email = customer.email;
+            await customerDoc.save();
+        }
+
+        // Update appointment
+        const updatedAppointment = await Appointment.findByIdAndUpdate(
+            req.params.id,
+            {
+                customer: customerDoc._id,
+                service: service,
+                staff: staff,
+                dateTime: dateTime,
+                notes: notes,
+                status: status,
+                updatedAt: Date.now()
+            },
+            { new: true }
+        ).populate('customer')
+         .populate('service')
+         .populate('staff');
+
+        if (!updatedAppointment) {
+            return res.status(404).json({ message: 'Appointment not found' });
+        }
+
         res.json(updatedAppointment);
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
 });
 
-// DELETE an appointment
+// DELETE appointment
 router.delete('/:id', async (req, res) => {
     try {
-        await Appointment.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Appointment deleted' });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-});
-
-// GET all services (for populating the service dropdown)
-router.get('/services/list', async (req, res) => {
-    try {
-        const services = await Service.find({}, 'serviceName');
-        res.json(services);
+        const appointment = await Appointment.findById(req.params.id);
+        if (!appointment) {
+            return res.status(404).json({ message: 'Appointment not found' });
+        }
+        
+        await appointment.remove();
+        res.json({ message: 'Appointment deleted successfully' });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
