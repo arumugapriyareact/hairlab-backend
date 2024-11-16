@@ -35,7 +35,7 @@ const DashboardSchema = new mongoose.Schema({
   }],
   topProducts: [{
     product: String,
-    sales: Number
+    sales: Number 
   }],
   topServices: [{
     service: String,
